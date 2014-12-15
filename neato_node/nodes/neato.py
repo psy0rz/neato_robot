@@ -67,7 +67,7 @@ class NeatoNode:
         self.x = 0                  # position in xy plane
         self.y = 0
         self.th = 0
-        then = rospy.Time.now()
+        prev_odom_stamp = rospy.Time.now()
 
         # things that don't ever change
         scan_link = rospy.get_param('~frame_id','base_laser_link')
@@ -79,69 +79,90 @@ class NeatoNode:
         scan.range_max = 5.0
         odom = Odometry(header=rospy.Header(frame_id="odom"), child_frame_id='base_link')
     
-        # main loop of driver
-        r = rospy.Rate(5)
-        self.robot.requestScan()
-        while not rospy.is_shutdown():
-            # prepare laser scan
-            scan.header.stamp = rospy.Time.now()    
-            #self.robot.requestScan()
-            scan.ranges = self.robot.getScanRanges()
+        prev_cmd_vel=[]
 
-            # get motor encoder values
-            left, right = self.robot.getMotors()
+        try:
+            # main loop of driver
+            while not rospy.is_shutdown():
 
-            # send updated movement commands
-            self.robot.setMotors(self.cmd_vel[0], self.cmd_vel[1], max(abs(self.cmd_vel[0]),abs(self.cmd_vel[1])))
-            
-            # ask for the next scan while we finish processing stuff
-            self.robot.requestScan()
-            
-            # now update position information
-            dt = (scan.header.stamp - then).to_sec()
-            then = scan.header.stamp
+                # send updated movement commands, if changed otherwise every second
+                if self.cmd_vel!=prev_cmd_vel or (rospy.Time.now()-last_move).to_sec()>=(1-0.2):
+                    self.robot.setMotors(self.cmd_vel[0], self.cmd_vel[1], max(abs(self.cmd_vel[0]),abs(self.cmd_vel[1])))
+                    prev_cmd_vel=self.cmd_vel[:]
+                    last_move=rospy.Time.now()
 
-            d_left = (left - encoders[0])/1000.0
-            d_right = (right - encoders[1])/1000.0
-            encoders = [left, right]
-            
-            dx = (d_left+d_right)/2
-            dth = (d_right-d_left)/(BASE_WIDTH/1000.0)
+                #laser scanner
+                scan.header.stamp = rospy.Time.now() #try to get this as close to the actual time of the scan as possible.
+                self.robot.requestScan()
+                scan.ranges = self.robot.getScanRanges()
+                self.scanPub.publish(scan)
 
-            x = cos(dth)*dx
-            y = -sin(dth)*dx
-            self.x += cos(self.th)*x - sin(self.th)*y
-            self.y += sin(self.th)*x + cos(self.th)*y
-            self.th += dth
+                # get motor encoder values
+                odom_stamp=rospy.Time.now()
+                left, right = self.robot.getMotors()
+                dt = (odom_stamp - prev_odom_stamp).to_sec()
+                prev_odom_stamp=odom_stamp
+                print(dt)
 
-            # prepare tf from base_link to odom
-            quaternion = Quaternion()
-            quaternion.z = sin(self.th/2.0)
-            quaternion.w = cos(self.th/2.0)
+                #calculate delta-S of each wheel in meters
+                d_left = (left - encoders[0])/1000.0
+                d_right = (right - encoders[1])/1000.0
+                encoders = [left, right]
+                
+                # distance traveled is the average of the two wheels
+                dx = (d_left+d_right)/2
+                # this approximation works (in radians) for small angles
+                dth = (d_right-d_left)/(BASE_WIDTH/1000.0)
 
-            # prepare odometry
-            odom.header.stamp = rospy.Time.now()
-            odom.pose.pose.position.x = self.x
-            odom.pose.pose.position.y = self.y
-            odom.pose.pose.position.z = 0
-            odom.pose.pose.orientation = quaternion
-            odom.twist.twist.linear.x = dx/dt
-            odom.twist.twist.angular.z = dth/dt
+                x = cos(dth)*dx
+                y = -sin(dth)*dx
+                self.x += cos(self.th)*x - sin(self.th)*y
+                self.y += sin(self.th)*x + cos(self.th)*y
+                self.th += dth
 
-            # publish everything
-            self.odomBroadcaster.sendTransform( (self.x, self.y, 0), (quaternion.x, quaternion.y, quaternion.z, quaternion.w),
-                then, "base_link", "odom" )
-            self.scanPub.publish(scan)
-            self.odomPub.publish(odom)
+                #komt tot zo ver overeen met https://code.google.com/p/differential-drive/source/browse/nodes/diff_tf.py
 
-            # wait, then do it again
-            r.sleep()
+                # prepare tf from base_link to odom
+                quaternion = Quaternion()
+                quaternion.z = sin(self.th/2.0)
+                quaternion.w = cos(self.th/2.0)
+
+                # prepare odometry
+                odom.header.stamp = odom_stamp
+                odom.pose.pose.position.x = self.x
+                odom.pose.pose.position.y = self.y
+                odom.pose.pose.position.z = 0
+                odom.pose.pose.orientation = quaternion
+                #NOTE: differential drive robots can only move in the x-axis and rotate in along the z-axis            
+                odom.twist.twist.linear.x = dx/dt
+                odom.twist.twist.angular.z = dth/dt
+
+                # publish everything
+                self.odomBroadcaster.sendTransform( (self.x, self.y, 0), (quaternion.x, quaternion.y, quaternion.z, quaternion.w),
+                    odom_stamp, "base_link", "odom" )
+                self.odomPub.publish(odom)
+
+                # wait, then do it again
+                #dont sleep, its slow enough already. 
+                #r.sleep()
+        except:
+            # always try to shut down
+            self.robot.setLDS("off")
+            self.robot.setTestMode("off") 
+            raise
 
         # shut down
         self.robot.setLDS("off")
         self.robot.setTestMode("off") 
 
     def cmdVelCb(self,req):
+
+        if req.linear.y!=0 or req.linear.z!=0:
+            rospy.logerr("Warning, only linear movement in x direction supported")
+
+        if req.angular.x!=0 or req.angular.y!=0:
+            rospy.logerr("Warning, only angular movement in z direction is supported")
+
         x = req.linear.x * 1000
         th = req.angular.z * (BASE_WIDTH/2) 
         k = max(abs(x-th),abs(x+th))

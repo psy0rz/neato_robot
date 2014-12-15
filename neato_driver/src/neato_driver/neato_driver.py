@@ -34,7 +34,9 @@ __author__ = "ferguson@cs.albany.edu (Michael Ferguson)"
 
 import serial
 
-BASE_WIDTH = 248    # millimeters
+#FIXME: shouldnt this be the distance from the middle to the other middle of the wheel? which is: 235mm
+#BASE_WIDTH = 248    # millimeters
+BASE_WIDTH = 235    # millimeters
 MAX_SPEED = 300     # millimeters/second
 
 xv11_analog_sensors = [ "WallSensorInMM",
@@ -203,6 +205,7 @@ class xv11():
                 self.state[values[0]] = int(values[1])
             except:
                 pass
+
         return [self.state["LeftWheel_PositionInMM"],self.state["RightWheel_PositionInMM"]]
 
     def getAnalogSensors(self):
